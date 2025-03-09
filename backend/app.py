@@ -1,29 +1,38 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import model  # Import our LSTM model
+import model  # The updated model.py above
 
 app = Flask(__name__)
-CORS(app)  # Enable Cross-Origin Resource Sharing (CORS)
+CORS(app)
 
 @app.route("/")
 def home():
-    return jsonify({"message": "Stock Prediction API is running!"})
+    return jsonify({"message": "Stock Prediction API Running!"})
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         data = request.get_json()
-        stock_ticker = data.get("ticker", "AAPL")  # Default to AAPL if no input
+        if not data:
+            return jsonify({"error": "No JSON body provided"}), 400
 
-        predictions = model.stock_price_prediction(stock_ticker)
+        ticker = data.get("ticker", "AAPL").upper()
+        # Convert 'days' to int to avoid str -> int errors
+        future_days_raw = data.get("days", 10)
+        try:
+            future_days = int(future_days_raw)
+        except ValueError:
+            return jsonify({"error": f"'days' must be an integer, got {future_days_raw}"}), 400
 
-        if isinstance(predictions, dict) and "error" in predictions:
-            return jsonify(predictions)  # Return error if stock has insufficient data
+        result = model.stock_price_prediction(ticker, future_days)
+        if isinstance(result, dict) and "error" in result:
+            return jsonify(result), 400
 
-        return jsonify({"ticker": stock_ticker, "predictions": predictions.tolist()})
-    
+        return jsonify(result), 200
+
     except Exception as e:
-        return jsonify({"error": str(e)})
+        print("[ERROR] Exception in /predict route:", e)
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
