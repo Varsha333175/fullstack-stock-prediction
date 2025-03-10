@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import "bootstrap/dist/css/bootstrap.min.css";
+import { io } from "socket.io-client";
 import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
@@ -24,68 +25,68 @@ ChartJS.register(
   Filler
 );
 
+const socket = io("http://127.0.0.1:5000");
+
 const App = () => {
   const [ticker, setTicker] = useState("");
   const [days, setDays] = useState(10);
-  const [predictions, setPredictions] = useState([]);
+  const [testDates, setTestDates] = useState([]);
+  const [testActualOpen, setTestActualOpen] = useState([]);
+  const [testActualClose, setTestActualClose] = useState([]);
+  const [testPredictedOpen, setTestPredictedOpen] = useState([]);
+  const [testPredictedClose, setTestPredictedClose] = useState([]);
+  const [futurePredictions, setFuturePredictions] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const fetchPredictions = async () => {
-    setLoading(true);
-    setError("");
-    setPredictions([]);
+  useEffect(() => {
+    socket.on("connect", () => console.log("[Socket] Connected:", socket.id));
 
-    try {
-      const response = await fetch("http://127.0.0.1:5000/predict", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticker: ticker.toUpperCase(), days: parseInt(days, 10) }),
-      });
+    socket.on("backtest_result", (res) => {
+      console.log("[Socket] Backtest Result:", res);
+      setTestDates(res.test_dates || []);
+      setTestActualOpen(res.actual_open_test || []);
+      setTestActualClose(res.actual_close_test || []);
+      setTestPredictedOpen(res.predicted_open_test || []);
+      setTestPredictedClose(res.predicted_close_test || []);
+    });
 
-      const data = await response.json();
-      if (data.error) setError(data.error);
-      else setPredictions(data.future_prediction);
-    } catch (err) {
-      setError("Failed to fetch predictions");
+    socket.on("partial_future", (msg) => {
+      console.log("[Socket] Partial Future:", msg);
+      setFuturePredictions((prev) => [...prev, { date: msg.date, open: msg.open, close: msg.close }]);
+    });
+
+    socket.on("prediction_complete", () => setLoading(false));
+    
+    socket.on("error", (err) => {
+      console.error("[Socket] Error:", err);
+      setError(err.error || JSON.stringify(err));
+      setLoading(false);
+    });
+
+    return () => {
+      socket.off("connect");
+      socket.off("backtest_result");
+      socket.off("partial_future");
+      socket.off("prediction_complete");
+      socket.off("error");
+    };
+  }, []);
+
+  const startPrediction = () => {
+    if (!ticker) {
+      setError("Please enter a stock ticker.");
+      return;
     }
-    setLoading(false);
-  };
-
-  const chartData = {
-    labels: predictions.map((p) => p.date),
-    datasets: [
-      {
-        label: "Predicted Open Price",
-        data: predictions.map((p) => p.open_prediction),
-        borderColor: "green",
-        backgroundColor: "rgba(0, 255, 0, 0.2)",
-        fill: true,
-      },
-      {
-        label: "Predicted Close Price",
-        data: predictions.map((p) => p.close_prediction),
-        borderColor: "blue",
-        backgroundColor: "rgba(0, 0, 255, 0.2)",
-        fill: true,
-      },
-    ],
-  };
-  
-  const chartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: { display: true, position: "top" },
-      title: { display: true, text: `Predicted Stock Prices for ${ticker.toUpperCase()}` },
-    },
-    scales: {
-      x: { title: { display: true, text: "Date" } },
-      y: {
-        title: { display: true, text: "Stock Price (USD)" },
-        ticks: { callback: (val) => `$${val.toFixed(2)}` },
-      },
-    },
+    setError("");
+    setLoading(true);
+    setTestDates([]);
+    setTestActualOpen([]);
+    setTestActualClose([]);
+    setTestPredictedOpen([]);
+    setTestPredictedClose([]);
+    setFuturePredictions([]);
+    socket.emit("start_prediction", { ticker: ticker.toUpperCase(), days: parseInt(days, 10) });
   };
 
   return (
@@ -97,48 +98,48 @@ const App = () => {
       </nav>
 
       <div className="container my-4">
-        <div className="row justify-content-center">
+        <div className="row justify-content-center mb-4">
           <div className="col-md-6">
             <div className="card p-3">
-              <h4 className="text-center">Stock Prediction</h4>
               <label className="form-label">Stock Ticker</label>
-              <input
-                type="text"
-                className="form-control mb-2"
-                placeholder="e.g., AAPL"
-                value={ticker}
-                onChange={(e) => setTicker(e.target.value)}
-              />
+              <input type="text" className="form-control mb-2" placeholder="e.g., AAPL" value={ticker} onChange={(e) => setTicker(e.target.value)} />
               <label className="form-label">Future Days</label>
-              <input
-                type="number"
-                className="form-control mb-3"
-                placeholder="10"
-                value={days}
-                onChange={(e) => setDays(e.target.value)}
-              />
-              <button className="btn btn-primary" onClick={fetchPredictions} disabled={loading}>
+              <input type="number" className="form-control mb-3" placeholder="10" value={days} onChange={(e) => setDays(e.target.value)} />
+              <button className="btn btn-primary" onClick={startPrediction} disabled={loading}>
                 {loading ? "Predicting..." : "Predict"}
               </button>
             </div>
           </div>
         </div>
 
-        {error && <div className="alert alert-danger text-center mt-3">{error}</div>}
+        {error && <div className="alert alert-danger text-center">{error}</div>}
 
-        {predictions.length > 0 && (
-          <div className="mt-4">
-            <h4 className="text-center">Stock Price Prediction Graph</h4>
-            <div className="chart-container" style={{ height: "400px" }}>
-              <Line data={chartData} options={chartOptions} />
-            </div>
+        {testDates.length > 0 && (
+          <div className="mb-5" style={{ height: "400px" }}>
+            <Line data={{
+              labels: testDates,
+              datasets: [
+                { label: "Actual Open", data: testActualOpen, borderColor: "green" },
+                { label: "Predicted Open", data: testPredictedOpen, borderColor: "blue" },
+                { label: "Actual Close", data: testActualClose, borderColor: "purple" },
+                { label: "Predicted Close", data: testPredictedClose, borderColor: "red" },
+              ]
+            }} />
+          </div>
+        )}
+
+        {futurePredictions.length > 0 && (
+          <div className="mb-5" style={{ height: "400px" }}>
+            <Line data={{
+              labels: futurePredictions.map((p) => p.date),
+              datasets: [
+                { label: "Predicted Open", data: futurePredictions.map((p) => p.open), borderColor: "blue" },
+                { label: "Predicted Close", data: futurePredictions.map((p) => p.close), borderColor: "red" }
+              ]
+            }} />
           </div>
         )}
       </div>
-
-      <footer className="bg-dark text-white text-center py-3 mt-auto">
-        <p className="mb-0">© 2025 Stock Predictor</p>
-      </footer>
     </div>
   );
 };
