@@ -56,15 +56,22 @@ const App = () => {
     labels: predictions.map((p) => p.date),
     datasets: [
       {
-        label: `Stock Price Prediction (${ticker.toUpperCase()})`,
-        data: predictions.map((p) => p.prediction),
+        label: "Predicted Open Price",
+        data: predictions.map((p) => p.open_prediction),
+        borderColor: "green",
+        backgroundColor: "rgba(0, 255, 0, 0.2)",
+        fill: true,
+      },
+      {
+        label: "Predicted Close Price",
+        data: predictions.map((p) => p.close_prediction),
         borderColor: "blue",
         backgroundColor: "rgba(0, 0, 255, 0.2)",
         fill: true,
       },
     ],
   };
-
+  
   const chartOptions = {
     responsive: true,
     maintainAspectRatio: false,
