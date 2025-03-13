@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import "bootstrap/dist/css/bootstrap.min.css";
-import { io } from "socket.io-client";
 import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
@@ -10,83 +9,65 @@ import {
   PointElement,
   Tooltip,
   Title,
-  Legend,
-  Filler
+  Legend
 } from "chart.js";
 
-ChartJS.register(
-  LineElement,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  Tooltip,
-  Title,
-  Legend,
-  Filler
-);
+// Register Chart.js components
+ChartJS.register(LineElement, CategoryScale, LinearScale, PointElement, Tooltip, Title, Legend);
 
-const socket = io("http://127.0.0.1:5000");
+const API_URL = "http://127.0.0.1:5000/predict"; // Flask API URL
 
 const App = () => {
   const [ticker, setTicker] = useState("");
   const [days, setDays] = useState(10);
   const [testDates, setTestDates] = useState([]);
-  const [testActualOpen, setTestActualOpen] = useState([]);
   const [testActualClose, setTestActualClose] = useState([]);
-  const [testPredictedOpen, setTestPredictedOpen] = useState([]);
   const [testPredictedClose, setTestPredictedClose] = useState([]);
-  const [futurePredictions, setFuturePredictions] = useState([]);
+  const [futureDates, setFutureDates] = useState([]);
+  const [futureOpen, setFutureOpen] = useState([]);
+  const [futureClose, setFutureClose] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    socket.on("connect", () => console.log("[Socket] Connected:", socket.id));
-
-    socket.on("backtest_result", (res) => {
-      console.log("[Socket] Backtest Result:", res);
-      setTestDates(res.test_dates || []);
-      setTestActualOpen(res.actual_open_test || []);
-      setTestActualClose(res.actual_close_test || []);
-      setTestPredictedOpen(res.predicted_open_test || []);
-      setTestPredictedClose(res.predicted_close_test || []);
-    });
-
-    socket.on("partial_future", (msg) => {
-      console.log("[Socket] Partial Future:", msg);
-      setFuturePredictions((prev) => [...prev, { date: msg.date, open: msg.open, close: msg.close }]);
-    });
-
-    socket.on("prediction_complete", () => setLoading(false));
-    
-    socket.on("error", (err) => {
-      console.error("[Socket] Error:", err);
-      setError(err.error || JSON.stringify(err));
-      setLoading(false);
-    });
-
-    return () => {
-      socket.off("connect");
-      socket.off("backtest_result");
-      socket.off("partial_future");
-      socket.off("prediction_complete");
-      socket.off("error");
-    };
-  }, []);
-
-  const startPrediction = () => {
+  const fetchPredictions = async () => {
     if (!ticker) {
       setError("Please enter a stock ticker.");
       return;
     }
+
     setError("");
     setLoading(true);
-    setTestDates([]);
-    setTestActualOpen([]);
-    setTestActualClose([]);
-    setTestPredictedOpen([]);
-    setTestPredictedClose([]);
-    setFuturePredictions([]);
-    socket.emit("start_prediction", { ticker: ticker.toUpperCase(), days: parseInt(days, 10) });
+
+    try {
+      const response = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker: ticker.toUpperCase(), days: parseInt(days, 10) })
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        console.log("API Response:", data);
+
+        // Backtest results
+        setTestDates(data.backtest_result.test_dates || []);
+        setTestActualClose(data.backtest_result.actual_close_prices || []);
+        setTestPredictedClose(data.backtest_result.predicted_close_prices || []);
+
+        // Future predictions
+        setFutureDates(data.future_prediction.map((p) => p.date) || []);
+        setFutureOpen(data.future_prediction.map((p) => p.open_prediction) || []);
+        setFutureClose(data.future_prediction.map((p) => p.close_prediction) || []);
+      } else {
+        setError(data.error || "Error fetching predictions.");
+      }
+    } catch (err) {
+      setError("Network error: Unable to fetch data.");
+      console.error("Fetch error:", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -102,10 +83,22 @@ const App = () => {
           <div className="col-md-6">
             <div className="card p-3">
               <label className="form-label">Stock Ticker</label>
-              <input type="text" className="form-control mb-2" placeholder="e.g., AAPL" value={ticker} onChange={(e) => setTicker(e.target.value)} />
+              <input
+                type="text"
+                className="form-control mb-2"
+                placeholder="e.g., AAPL"
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value)}
+              />
               <label className="form-label">Future Days</label>
-              <input type="number" className="form-control mb-3" placeholder="10" value={days} onChange={(e) => setDays(e.target.value)} />
-              <button className="btn btn-primary" onClick={startPrediction} disabled={loading}>
+              <input
+                type="number"
+                className="form-control mb-3"
+                placeholder="10"
+                value={days}
+                onChange={(e) => setDays(e.target.value)}
+              />
+              <button className="btn btn-primary" onClick={fetchPredictions} disabled={loading}>
                 {loading ? "Predicting..." : "Predict"}
               </button>
             </div>
@@ -114,29 +107,67 @@ const App = () => {
 
         {error && <div className="alert alert-danger text-center">{error}</div>}
 
-        {testDates.length > 0 && (
+        {/* Backtest Results Graph */}
+        {testDates.length > 0 && testActualClose.length > 0 && testPredictedClose.length > 0 && (
           <div className="mb-5" style={{ height: "400px" }}>
-            <Line data={{
-              labels: testDates,
-              datasets: [
-                { label: "Actual Open", data: testActualOpen, borderColor: "green" },
-                { label: "Predicted Open", data: testPredictedOpen, borderColor: "blue" },
-                { label: "Actual Close", data: testActualClose, borderColor: "purple" },
-                { label: "Predicted Close", data: testPredictedClose, borderColor: "red" },
-              ]
-            }} />
+            <Line
+              data={{
+                labels: testDates,
+                datasets: [
+                  { label: "Actual Close", data: testActualClose, borderColor: "purple", borderWidth: 2 },
+                  { label: "Predicted Close", data: testPredictedClose, borderColor: "red", borderWidth: 2, borderDash: [5, 5] }
+                ]
+              }}
+              options={{
+                scales: {
+                  y: {
+                    beginAtZero: false,
+                    ticks: {
+                      callback: function (value) {
+                        return "$" + value.toFixed(2); // Format as USD
+                      }
+                    }
+                  }
+                },
+                plugins: {
+                  legend: { position: "top" },
+                  tooltip: {
+                    callbacks: {
+                      label: function (tooltipItem) {
+                        return tooltipItem.dataset.label + ": $" + tooltipItem.raw.toFixed(2);
+                      }
+                    }
+                  }
+                }
+              }}
+            />
           </div>
         )}
 
-        {futurePredictions.length > 0 && (
+        {/* Future Predictions Graph */}
+        {futureDates.length > 0 && futureOpen.length > 0 && futureClose.length > 0 && (
           <div className="mb-5" style={{ height: "400px" }}>
-            <Line data={{
-              labels: futurePredictions.map((p) => p.date),
-              datasets: [
-                { label: "Predicted Open", data: futurePredictions.map((p) => p.open), borderColor: "blue" },
-                { label: "Predicted Close", data: futurePredictions.map((p) => p.close), borderColor: "red" }
-              ]
-            }} />
+            <Line
+              data={{
+                labels: futureDates,
+                datasets: [
+                  { label: "Predicted Open", data: futureOpen, borderColor: "blue", borderWidth: 2 },
+                  { label: "Predicted Close", data: futureClose, borderColor: "red", borderWidth: 2, borderDash: [5, 5] }
+                ]
+              }}
+              options={{
+                scales: {
+                  y: {
+                    beginAtZero: false,
+                    ticks: {
+                      callback: function (value) {
+                        return "$" + value.toFixed(2); // Format as USD
+                      }
+                    }
+                  }
+                }
+              }}
+            />
           </div>
         )}
       </div>
