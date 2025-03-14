@@ -1,9 +1,13 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from model import train_model, predict_future, backtest_model
+import logging
+from model import predict_future  # Ensure this is correctly imported
 
 app = Flask(__name__)
 CORS(app)
+
+# ✅ Enable Logging
+logging.basicConfig(level=logging.INFO)
 
 @app.route("/")
 def home():
@@ -11,7 +15,7 @@ def home():
 
 @app.route("/predict", methods=["POST"])
 def predict_stock():
-    """REST API for stock prediction and backtesting."""
+    """REST API for stock prediction."""
     try:
         data = request.get_json()
         if not data:
@@ -20,17 +24,19 @@ def predict_stock():
         ticker = data.get("ticker", "AAPL").upper()
         future_days = int(data.get("days", 10))
 
-        # Predict future stock prices
+        # ✅ Log request details
+        logging.info(f"📡 Received Prediction Request: {ticker}, Days: {future_days}")
+
+        # ✅ Run prediction
         future_predictions = predict_future(ticker, future_days)
 
-        # Backtest results
-        backtest_results = backtest_model(ticker)
+        # ✅ Log output before sending
+        logging.info(f"📊 Future Predictions: {future_predictions}")
 
-        return jsonify({
-            "backtest_result": backtest_results,
-            "future_prediction": future_predictions
-        }), 200
+        return jsonify({"future_prediction": future_predictions}), 200
+
     except Exception as e:
+        logging.error(f"❌ API Error: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
