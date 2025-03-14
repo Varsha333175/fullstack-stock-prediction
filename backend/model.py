@@ -9,7 +9,6 @@ import requests
 import yfinance as yf
 from datetime import timedelta
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error
 from torch.utils.data import DataLoader, TensorDataset
 
 # ✅ Enable Logging
@@ -19,7 +18,6 @@ logging.basicConfig(level=logging.INFO)
 MODEL_DIR = "models"
 MODEL_PATH = os.path.join(MODEL_DIR, "lstm_model.pt")
 
-# ✅ Ensure 'models/' directory exists
 if not os.path.exists(MODEL_DIR):
     os.makedirs(MODEL_DIR)
     logging.info("📂 Created 'models/' directory")
@@ -51,22 +49,18 @@ def fetch_stock_data(ticker, period="2y"):
 
 # ✅ Fetch Market Sentiment Score
 def fetch_sentiment_score(ticker):
-    """Fetch latest market news sentiment score for the stock."""
     try:
         url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&symbol={ticker}&apikey=YOUR_API_KEY"
         response = requests.get(url).json()
-
         if "feed" not in response:
-            return 0  # No sentiment data found
-
+            return 0  
         sentiment_scores = [article["overall_sentiment_score"] for article in response["feed"]]
-        return sum(sentiment_scores) / len(sentiment_scores)  # Average sentiment score
+        return sum(sentiment_scores) / len(sentiment_scores)
     except:
-        return 0  # Default to neutral if API fails
+        return 0  
 
 # ✅ Fetch Fundamental Stock Data
 def fetch_fundamentals(ticker):
-    """Fetch key financial metrics for stock analysis."""
     stock = yf.Ticker(ticker)
     info = stock.info
 
@@ -79,15 +73,13 @@ def fetch_fundamentals(ticker):
 
 # ✅ Fetch Macroeconomic Indicators
 def fetch_macro_data():
-    """Fetch key macroeconomic indicators affecting the stock market."""
     try:
         url = "https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=YOUR_API_KEY&file_type=json"
         response = requests.get(url).json()
-
-        interest_rate = float(response["observations"][-1]["value"])  # Latest interest rate
+        interest_rate = float(response["observations"][-1]["value"])
         return {"interest_rate": interest_rate}
     except:
-        return {"interest_rate": 0}  # Default if API fails
+        return {"interest_rate": 0}
 
 # ✅ Preprocess Data
 def preprocess_data(df, ticker):
@@ -119,6 +111,8 @@ def create_sequences(data, seq_length=180):
     return np.array(X), np.array(y)
 
 # ✅ Train or Load Model
+import time
+
 def train_hybrid_model(ticker):
     df = fetch_stock_data(ticker)
     if isinstance(df, dict) and "error" in df:
@@ -128,19 +122,10 @@ def train_hybrid_model(ticker):
     X, y_actual = create_sequences(scaled_data, seq_length=180)
 
     sentiment_score = fetch_sentiment_score(ticker)
-    y_actual = [y * (1 + sentiment_score * 0.01) for y in y_actual]  # Adjust targets using sentiment
+    y_actual = [y * (1 + sentiment_score * 0.01) for y in y_actual]
 
     model = LightLSTM(input_dim=X.shape[2])
-
-    if os.path.exists(MODEL_PATH):
-        try:
-            model.load_state_dict(torch.load(MODEL_PATH))
-            model.eval()
-            logging.info("✅ Loaded Pre-Trained LSTM Model")
-            return model, scaler
-        except Exception as e:
-            logging.warning(f"⚠️ Model loading error: {e}, retraining...")
-
+    
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.MSELoss()
 
@@ -157,16 +142,10 @@ def train_hybrid_model(ticker):
         if (epoch + 1) % 5 == 0:
             logging.info(f"🔄 Training Epoch [{epoch+1}/10] - Loss: {loss.item():.4f}")
 
-    torch.save(model.state_dict(), MODEL_PATH)
-    logging.info("✅ Model Trained & Saved")
+    logging.info("✅ Model Retrained")
 
+    # ✅ Return the trained model and scaler every time
     return model, scaler
-
-# ✅ Predict Future
-import numpy as np
-import torch
-import logging
-from datetime import timedelta
 
 def predict_future(ticker, days=15):
     """Predicts future stock prices while dynamically updating predictions."""
@@ -176,35 +155,39 @@ def predict_future(ticker, days=15):
     if isinstance(df, dict) and "error" in df:
         return df
 
-    # ✅ Pass `ticker` to preprocess_data
     scaled_data, scaler = preprocess_data(df, ticker)
     X, _ = create_sequences(scaled_data, seq_length=180)
-    last_sequence = X[-1]
+    
+    # ✅ Ensure last_sequence has the correct shape (1, 180, 10)
+    last_sequence = X[-1].reshape(1, X.shape[1], X.shape[2])
 
-    model, scaler = train_hybrid_model(ticker)
+    model, _ = train_hybrid_model(ticker)
 
     predictions = []
     last_date = df.index[-1].date()
-    sentiment_score = fetch_sentiment_score(ticker)  # Fetch latest news sentiment
-    logging.info(f"📊 Market Sentiment for {ticker}: {sentiment_score}")
+    sentiment_score = fetch_sentiment_score(ticker)
 
-    volatility_factor_range = (0.99, 1.01)  # ✅ Less volatility
+    volatility_factor_range = (0.99, 1.01)
 
     for _ in range(days):
         last_date += timedelta(days=1)
         if last_date.weekday() >= 5:
             continue
 
-        X_tensor = torch.tensor(last_sequence.reshape(1, *last_sequence.shape), dtype=torch.float32)
+        X_tensor = torch.tensor(last_sequence, dtype=torch.float32)
         pred_scaled = model(X_tensor).detach().numpy().flatten()
 
+        # ✅ Ensure predicted value is mapped to the correct feature index
+        new_row = np.zeros((1, last_sequence.shape[2]))  # Ensure 10 features
+        new_row[0, 1] = pred_scaled[0]  # Assign to the 'Close' feature column
+
         # ✅ Convert scaled prediction to actual price
-        dummy_features = np.zeros((1, scaled_data.shape[1]))
-        dummy_features[:, 1] = pred_scaled
+        dummy_features = np.zeros((1, scaled_data.shape[1]))  
+        dummy_features[:, 1] = pred_scaled[0]  
         pred_actual = scaler.inverse_transform(dummy_features)[:, 1][0]
 
-        # ✅ Adjust based on market sentiment (Prevent Large Drops)
-        sentiment_adjustment = 1 + (sentiment_score * 0.001)  # Lower sensitivity
+        # ✅ Apply sentiment adjustment
+        sentiment_adjustment = 1 + (sentiment_score * 0.001)
         volatility_factor = np.random.uniform(*volatility_factor_range)
         pred_actual *= volatility_factor * sentiment_adjustment
 
@@ -216,10 +199,9 @@ def predict_future(ticker, days=15):
         predictions.append({"date": str(last_date), "close_prediction": round(float(pred_actual), 2)})
         logging.info(f"📅 {last_date}: {pred_actual} USD")
 
-        # 🔄 Update last_sequence
-        new_row = last_sequence[-1].copy()
-        new_row[1] = pred_scaled[0]  
-        last_sequence = np.vstack([last_sequence[1:], new_row])
+        # ✅ Properly reshape and update last_sequence
+        last_sequence = np.vstack([last_sequence[0][1:], new_row])  # (180, 10)
+        last_sequence = last_sequence.reshape(1, 180, last_sequence.shape[1])  # Ensure correct shape (1,180,10)
 
     logging.info("✅ Prediction Completed")
     return predictions
