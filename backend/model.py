@@ -33,10 +33,12 @@ class LightLSTM(nn.Module):
         lstm_out, _ = self.lstm(x)
         return self.fc(lstm_out[:, -1])
 
-# ✅ Fetch Stock Data
+import pandas_ta as ta  # Replacement for TA-Lib
+
 def fetch_stock_data(ticker, period="2y"):
     stock = yf.Ticker(ticker)
     df = stock.history(period=period)
+
     if df.shape[0] < 200:
         return {"error": f"Not enough historical data for {ticker}"}
 
@@ -44,17 +46,31 @@ def fetch_stock_data(ticker, period="2y"):
     df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["Momentum"] = df["Close"].diff(5).fillna(0)
 
+    # ✅ Replacing TA-Lib with pandas_ta
+    df["RSI_14"] = df.ta.rsi(length=14)  # RSI Indicator
+    df["MACD"], df["MACD_Signal"] = df.ta.macd(fast=12, slow=26, signal=9).iloc[:, 0:2].values.T  # MACD Indicator
+    bb = df.ta.bbands(length=20)  # Bollinger Bands
+    df["Upper_BB"], df["Middle_BB"], df["Lower_BB"] = bb["BBU_20_2.0"], bb["BBM_20_2.0"], bb["BBL_20_2.0"]
+
     df.dropna(inplace=True)
     return df
 
 # ✅ Fetch Market Sentiment Score
+from transformers import pipeline
+
 def fetch_sentiment_score(ticker):
     try:
+        # 🔥 Use FinBERT for sentiment analysis
+        sentiment_model = pipeline("sentiment-analysis", model="ProsusAI/finbert")
         url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&symbol={ticker}&apikey=YOUR_API_KEY"
         response = requests.get(url).json()
+
         if "feed" not in response:
             return 0  
-        sentiment_scores = [article["overall_sentiment_score"] for article in response["feed"]]
+
+        news_headlines = [article["title"] for article in response["feed"]]
+        sentiment_scores = [sentiment_model(headline)[0]["score"] for headline in news_headlines]
+
         return sum(sentiment_scores) / len(sentiment_scores)
     except:
         return 0  
@@ -74,12 +90,18 @@ def fetch_fundamentals(ticker):
 # ✅ Fetch Macroeconomic Indicators
 def fetch_macro_data():
     try:
-        url = "https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=YOUR_API_KEY&file_type=json"
-        response = requests.get(url).json()
+        # ✅ Fetch Federal Interest Rate
+        fred_url = "https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=YOUR_API_KEY&file_type=json"
+        response = requests.get(fred_url).json()
         interest_rate = float(response["observations"][-1]["value"])
-        return {"interest_rate": interest_rate}
+
+        # ✅ Fetch VIX (Volatility Index)
+        vix_data = yf.Ticker("^VIX").history(period="1mo")
+        vix_value = vix_data["Close"].iloc[-1] if not vix_data.empty else 20  
+
+        return {"interest_rate": interest_rate, "vix": vix_value}
     except:
-        return {"interest_rate": 0}
+        return {"interest_rate": 0, "vix": 20}
 
 # ✅ Preprocess Data
 def preprocess_data(df, ticker):
@@ -146,9 +168,7 @@ def train_hybrid_model(ticker):
 
     # ✅ Return the trained model and scaler every time
     return model, scaler
-
 def predict_future(ticker, days=15):
-    """Predicts future stock prices while dynamically updating predictions."""
     logging.info(f"📢 Predicting {days} days for {ticker}")
 
     df = fetch_stock_data(ticker, period="2y")
@@ -157,17 +177,17 @@ def predict_future(ticker, days=15):
 
     scaled_data, scaler = preprocess_data(df, ticker)
     X, _ = create_sequences(scaled_data, seq_length=180)
-    
-    # ✅ Ensure last_sequence has the correct shape (1, 180, 10)
-    last_sequence = X[-1].reshape(1, X.shape[1], X.shape[2])
 
+    last_sequence = X[-1].reshape(1, X.shape[1], X.shape[2])
     model, _ = train_hybrid_model(ticker)
 
     predictions = []
     last_date = df.index[-1].date()
     sentiment_score = fetch_sentiment_score(ticker)
-
-    volatility_factor_range = (0.99, 1.01)
+    macro_data = fetch_macro_data()
+    
+    vix_value = macro_data["vix"]
+    volatility_factor_range = (0.98, 1.02) if vix_value > 25 else (0.99, 1.01)
 
     for _ in range(days):
         last_date += timedelta(days=1)
@@ -177,21 +197,18 @@ def predict_future(ticker, days=15):
         X_tensor = torch.tensor(last_sequence, dtype=torch.float32)
         pred_scaled = model(X_tensor).detach().numpy().flatten()
 
-        # ✅ Ensure predicted value is mapped to the correct feature index
-        new_row = np.zeros((1, last_sequence.shape[2]))  # Ensure 10 features
-        new_row[0, 1] = pred_scaled[0]  # Assign to the 'Close' feature column
+        new_row = np.zeros((1, last_sequence.shape[2]))
+        new_row[0, 1] = pred_scaled[0]
 
-        # ✅ Convert scaled prediction to actual price
         dummy_features = np.zeros((1, scaled_data.shape[1]))  
         dummy_features[:, 1] = pred_scaled[0]  
         pred_actual = scaler.inverse_transform(dummy_features)[:, 1][0]
 
-        # ✅ Apply sentiment adjustment
+        # ✅ Apply sentiment & VIX-based adjustments
         sentiment_adjustment = 1 + (sentiment_score * 0.001)
         volatility_factor = np.random.uniform(*volatility_factor_range)
         pred_actual *= volatility_factor * sentiment_adjustment
 
-        # ✅ Prevent unrealistic sharp drops (>2% in one day)
         last_close_price = df["Close"].iloc[-1]
         if abs(pred_actual - last_close_price) > (last_close_price * 0.02):  
             pred_actual = last_close_price * np.random.uniform(0.99, 1.01)
@@ -199,9 +216,12 @@ def predict_future(ticker, days=15):
         predictions.append({"date": str(last_date), "close_prediction": round(float(pred_actual), 2)})
         logging.info(f"📅 {last_date}: {pred_actual} USD")
 
-        # ✅ Properly reshape and update last_sequence
-        last_sequence = np.vstack([last_sequence[0][1:], new_row])  # (180, 10)
-        last_sequence = last_sequence.reshape(1, 180, last_sequence.shape[1])  # Ensure correct shape (1,180,10)
+        last_sequence = np.vstack([last_sequence[0][1:], new_row])
+        last_sequence = last_sequence.reshape(1, 180, last_sequence.shape[1])
+
+    # ✅ Print today's predicted price before completing predictions
+    logging.info(f"📊 Today's Predicted Price: {predictions[0]['close_prediction']} USD") 
 
     logging.info("✅ Prediction Completed")
     return predictions
+
